@@ -8,8 +8,11 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
+import ConnectionScreen from './ConnectionScreen';
 import { COLUMN_COUNT, ROW_COUNT, createGameState, playMove } from '../game';
 import type { GameState, Player } from '../game';
+import type { ConnectionSessionPort } from '../networking/PeerSession';
+import { decodeGameMessage, encodeGameMessage } from '../networking/gameMessages';
 
 const COLORS = {
   background: '#091326',
@@ -31,6 +34,8 @@ export default function GameScreen() {
   const { width } = useWindowDimensions();
   const [game, setGame] = useState<GameState>(() => createGameState());
   const [winnerRevealed, setWinnerRevealed] = useState(false);
+  const [showConnection, setShowConnection] = useState(false);
+  const [peerSession, setPeerSession] = useState<ConnectionSessionPort | null>(null);
   const boardOpacity = useRef(new Animated.Value(1)).current;
   const dropProgress = useRef(new Animated.Value(1)).current;
   const winnerCellKeys = useMemo(
@@ -79,13 +84,38 @@ export default function GameScreen() {
   }, [game.status, boardOpacity]);
 
   const dropPiece = (column: number) => {
-    setGame((current) => playMove(current, column));
+    const localPlayer: Player = peerSession?.getSnapshot().role === 'client' ? 2 : 1;
+    if (peerSession && game.currentPlayer !== localPlayer) return;
+    const next = playMove(game, column);
+    if (next === game) return;
+    if (peerSession) peerSession.sendMessage(encodeGameMessage({ type: 'move', column }));
+    setGame(next);
   };
 
   const restart = () => {
     setGame(createGameState());
     setWinnerRevealed(false);
+    peerSession?.sendMessage(encodeGameMessage({ type: 'restart' }));
   };
+
+  useEffect(() => {
+    if (!peerSession) return;
+    const unsubscribe = peerSession.subscribeMessages((raw) => {
+      const message = decodeGameMessage(raw);
+      if (!message) return;
+      if (message.type === 'restart') {
+        setGame(createGameState());
+        setWinnerRevealed(false);
+        return;
+      }
+      const remotePlayer: Player = peerSession.getSnapshot().role === 'host' ? 2 : 1;
+      setGame((current) => current.currentPlayer === remotePlayer ? playMove(current, message.column) : current);
+    });
+    return () => {
+      unsubscribe();
+      peerSession.dispose();
+    };
+  }, [peerSession]);
 
   const currentStatus = game.status === 'playing'
     ? `Player ${game.currentPlayer}'s turn`
@@ -95,8 +125,17 @@ export default function GameScreen() {
 
   return (
     <ScrollView contentContainerStyle={styles.screen} style={styles.scroll}>
-      <Text style={styles.eyebrow}>PASS & PLAY</Text>
+      <Text style={styles.eyebrow}>{peerSession ? 'ONLINE MATCH' : 'PASS & PLAY'}</Text>
       <Text style={styles.title}>Connect Four</Text>
+      <Pressable
+        testID="open-connection"
+        accessibilityRole="button"
+        onPress={() => setShowConnection(true)}
+        disabled={!!peerSession}
+        style={styles.connectionButton}
+      >
+        <Text style={styles.connectionButtonText}>{peerSession ? `Connected as Player ${peerSession.getSnapshot().role === 'host' ? 1 : 2}` : 'Connect another device'}</Text>
+      </Pressable>
 
       <View style={styles.turnBadge} accessibilityLiveRegion="polite">
         {game.status === 'playing' && (
@@ -183,6 +222,7 @@ export default function GameScreen() {
         <Text style={styles.restartText}>Restart game</Text>
       </Pressable>
       <Text style={styles.footer}>Tap any hole to drop into that column</Text>
+      {showConnection && <ConnectionScreen onClose={() => setShowConnection(false)} onConnected={(active) => { setPeerSession(active); setShowConnection(false); }} />}
     </ScrollView>
   );
 }
@@ -211,6 +251,14 @@ const styles = StyleSheet.create({
     borderRadius: 22,
     backgroundColor: '#15233A',
   },
+  connectionButton: {
+    marginBottom: 12,
+    paddingHorizontal: 15,
+    paddingVertical: 9,
+    borderRadius: 18,
+    backgroundColor: '#15233A',
+  },
+  connectionButtonText: { color: '#B9D2FF', fontSize: 13, fontWeight: '700' },
   turnDot: { width: 12, height: 12, borderRadius: 6 },
   turnText: { color: COLORS.text, fontSize: 16, fontWeight: '700' },
   boardFrame: {

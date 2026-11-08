@@ -4,8 +4,8 @@
   "private": true,
   "main": "node_modules/expo/AppEntry.js",
   "scripts": {
-    "start": "expo start",
-    "android": "expo start --android",
+    "start": "expo start --dev-client",
+    "android": "expo run:android",
     "test": "jest --runInBand",
     "typecheck": "tsc --noEmit"
   },
@@ -13,9 +13,17 @@
     "node": ">=22.13.0"
   },
   "dependencies": {
+    "@config-plugins/react-native-webrtc": "^15.0.2",
     "expo": "~58.0.22",
+    "expo-camera": "~58.0.14",
+    "expo-dev-client": "~58.0.18",
+    "expo-system-ui": "~58.0.7",
+    "lz-string": "^1.5.0",
     "react": "19.3.0",
-    "react-native": "0.88.1"
+    "react-native": "0.88.1",
+    "react-native-qrcode-svg": "^6.3.54",
+    "react-native-svg": "15.16.0",
+    "react-native-webrtc": "^124.0.7"
   },
   "devDependencies": {
     "@testing-library/react-native": "^13.3.3",

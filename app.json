@@ -5,8 +5,19 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Connect Four to scan a connection QR code.",
+          "recordAudioAndroid": false
+        }
+      ],
+      "@config-plugins/react-native-webrtc"
+    ],
     "android": {
-      "package": "com.connectfour.passandplay"
+      "package": "com.connectfour.passandplay",
+      "blockedPermissions": ["android.permission.RECORD_AUDIO"]
     }
   }
 }

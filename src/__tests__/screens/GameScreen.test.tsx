@@ -2,6 +2,14 @@ import { fireEvent, render, screen, act } from '@testing-library/react-native';
 import GameScreen from '../../screens/GameScreen';
 
 describe('GameScreen', () => {
+  test('opens the device connection flow without replacing the local board', () => {
+    // This checks the networking screen is reachable while preserving the current game screen.
+    render(<GameScreen />);
+    fireEvent.press(screen.getByTestId('open-connection'));
+    expect(screen.getByText('Host a connection')).toBeTruthy();
+    expect(screen.getByText("Player 1's turn")).toBeTruthy();
+  });
+
   test('tapping any hole selects that column and drops the piece to its lowest open row', () => {
     // This checks that a tap in the top hole still targets the full column and gravity chooses the bottom cell.
     render(<GameScreen />);
