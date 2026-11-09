@@ -1,5 +1,26 @@
 import { fireEvent, render, screen, act } from '@testing-library/react-native';
+import { StyleSheet } from 'react-native';
 import GameScreen from '../../screens/GameScreen';
+import type { ConnectionSessionPort, ConnectionSnapshot } from '../../networking/PeerSession';
+
+function createFakeSession() {
+  const snapshot: ConnectionSnapshot = { phase: 'connected', role: 'host', signalType: null, signalPayload: null, error: null };
+  let messageListener: ((message: string) => void) | undefined;
+  const session = {
+    getSnapshot: jest.fn(() => snapshot),
+    subscribe: jest.fn(() => () => undefined),
+    createOffer: jest.fn(),
+    acceptOffer: jest.fn(),
+    acceptAnswer: jest.fn(),
+    sendMessage: jest.fn(),
+    subscribeMessages: jest.fn((listener: (message: string) => void) => {
+      messageListener = listener;
+      return () => { messageListener = undefined; };
+    }),
+    dispose: jest.fn(),
+  } as unknown as ConnectionSessionPort;
+  return { session, receive: (message: string) => messageListener?.(message) };
+}
 
 describe('GameScreen', () => {
   test('opens the device connection flow without replacing the local board', () => {
@@ -32,12 +53,64 @@ describe('GameScreen', () => {
     jest.useRealTimers();
   });
 
-  test('restart clears the board and restores Player 1 as the current player', () => {
-    // This checks that the restart control begins a clean game after a move.
+  test('removes restart and presents a red Leave game action instead', () => {
+    // This checks neither local nor online players can unilaterally reset a match from the board.
     render(<GameScreen />);
-    fireEvent.press(screen.getByTestId('cell-0-2'));
-    fireEvent.press(screen.getByTestId('restart-button'));
-    expect(screen.getByText("Player 1's turn")).toBeTruthy();
-    expect(screen.getByTestId('cell-5-2').props.accessibilityLabel).toContain('empty');
+    expect(screen.queryByTestId('restart-button')).toBeNull();
+    expect(screen.getByTestId('leave-game')).toBeTruthy();
+    expect(StyleSheet.flatten(screen.getByTestId('leave-game').props.style).backgroundColor).toBe('#B42332');
+  });
+
+  test('canceling the leave confirmation keeps the game and connection active', () => {
+    // This checks an accidental leave tap can be canceled without notifying or disconnecting the opponent.
+    const { session } = createFakeSession();
+    const onExit = jest.fn();
+    render(<GameScreen connectionSession={session} onExit={onExit} />);
+    fireEvent.press(screen.getByTestId('leave-game'));
+    expect(screen.getByTestId('leave-confirmation')).toBeTruthy();
+    fireEvent.press(screen.getByTestId('cancel-leave'));
+    expect(screen.queryByTestId('leave-confirmation')).toBeNull();
+    expect(session.sendMessage).not.toHaveBeenCalled();
+    expect(session.dispose).not.toHaveBeenCalled();
+    expect(onExit).not.toHaveBeenCalled();
+  });
+
+  test('confirmed local leave returns to the menu without sending a forfeit message', () => {
+    // This checks the shared leave confirmation exits pass-and-play without using online signaling.
+    const onExit = jest.fn();
+    render(<GameScreen onExit={onExit} />);
+    fireEvent.press(screen.getByTestId('leave-game'));
+    fireEvent.press(screen.getByTestId('confirm-leave'));
+    expect(onExit).toHaveBeenCalledTimes(1);
+  });
+
+  test('confirmed online leave sends a forfeit, disposes the connection, and exits', () => {
+    // This checks only explicit confirmation forfeits the match and severs this player's peer session.
+    const { session } = createFakeSession();
+    const onExit = jest.fn();
+    render(<GameScreen connectionSession={session} onExit={onExit} />);
+    fireEvent.press(screen.getByTestId('leave-game'));
+    fireEvent.press(screen.getByTestId('confirm-leave'));
+    expect(session.sendMessage).toHaveBeenCalledWith('{"type":"forfeit"}');
+    expect(session.dispose).toHaveBeenCalledTimes(1);
+    expect(onExit).toHaveBeenCalledTimes(1);
+  });
+
+  test('shows the forfeit win animation and returns to the menu after the result is shown', () => {
+    // This checks the remaining player sees the forfeit result instead of being removed from the game immediately.
+    jest.useFakeTimers();
+    const { session, receive } = createFakeSession();
+    const onExit = jest.fn();
+    render(<GameScreen connectionSession={session} onExit={onExit} />);
+    act(() => receive('{"type":"forfeit"}'));
+    expect(session.dispose).toHaveBeenCalledTimes(1);
+    expect(onExit).not.toHaveBeenCalled();
+    act(() => jest.advanceTimersByTime(2900));
+    expect(screen.getByTestId('forfeit-message')).toBeTruthy();
+    expect(screen.getByText('You won by forfeit')).toBeTruthy();
+    expect(onExit).not.toHaveBeenCalled();
+    act(() => jest.advanceTimersByTime(2000));
+    expect(onExit).toHaveBeenCalledTimes(1);
+    jest.useRealTimers();
   });
 });

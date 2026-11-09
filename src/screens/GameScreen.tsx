@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -40,6 +41,8 @@ export default function GameScreen({ connectionSession = null, onExit }: GameScr
   const [game, setGame] = useState<GameState>(() => createGameState());
   const [winnerRevealed, setWinnerRevealed] = useState(false);
   const [showConnection, setShowConnection] = useState(false);
+  const [showLeaveConfirmation, setShowLeaveConfirmation] = useState(false);
+  const [opponentForfeited, setOpponentForfeited] = useState(false);
   const [peerSession, setPeerSession] = useState<ConnectionSessionPort | null>(connectionSession);
   const boardOpacity = useRef(new Animated.Value(1)).current;
   const dropProgress = useRef(new Animated.Value(1)).current;
@@ -53,6 +56,19 @@ export default function GameScreen({ connectionSession = null, onExit }: GameScr
   const discSize = cellSize * 0.72;
   const boardHeight = cellSize * ROW_COUNT;
 
+  const confirmLeave = () => {
+    setShowLeaveConfirmation(false);
+    if (peerSession) {
+      try {
+        peerSession.sendMessage(encodeGameMessage({ type: 'forfeit' }));
+      } catch {
+        // The peer may already be unreachable; still close the local connection and leave the game.
+      }
+      peerSession.dispose();
+    }
+    onExit?.();
+  };
+
   useEffect(() => {
     if (!game.lastMove) return;
     dropProgress.setValue(0);
@@ -65,7 +81,7 @@ export default function GameScreen({ connectionSession = null, onExit }: GameScr
   }, [game.lastMove, dropProgress]);
 
   useEffect(() => {
-    if (game.status !== 'won') {
+    if (game.status !== 'won' && !opponentForfeited) {
       boardOpacity.stopAnimation();
       boardOpacity.setValue(1);
       setWinnerRevealed(false);
@@ -82,13 +98,16 @@ export default function GameScreen({ connectionSession = null, onExit }: GameScr
     });
     fade.start();
     const revealTimeout = setTimeout(() => setWinnerRevealed(true), 2900);
+    const returnTimeout = opponentForfeited ? setTimeout(() => onExit?.(), 4900) : null;
     return () => {
       clearTimeout(revealTimeout);
+      if (returnTimeout) clearTimeout(returnTimeout);
       fade.stop();
     };
-  }, [game.status, boardOpacity]);
+  }, [game.status, opponentForfeited, boardOpacity, onExit]);
 
   const dropPiece = (column: number) => {
+    if (opponentForfeited) return;
     const localPlayer: Player = peerSession?.getSnapshot().role === 'client' ? 2 : 1;
     if (peerSession && game.currentPlayer !== localPlayer) return;
     const next = playMove(game, column);
@@ -97,20 +116,14 @@ export default function GameScreen({ connectionSession = null, onExit }: GameScr
     setGame(next);
   };
 
-  const restart = () => {
-    setGame(createGameState());
-    setWinnerRevealed(false);
-    peerSession?.sendMessage(encodeGameMessage({ type: 'restart' }));
-  };
-
   useEffect(() => {
     if (!peerSession) return;
     const unsubscribe = peerSession.subscribeMessages((raw) => {
       const message = decodeGameMessage(raw);
       if (!message) return;
-      if (message.type === 'restart') {
-        setGame(createGameState());
-        setWinnerRevealed(false);
+      if (message.type === 'forfeit') {
+        setOpponentForfeited(true);
+        peerSession.dispose();
         return;
       }
       const remotePlayer: Player = peerSession.getSnapshot().role === 'host' ? 2 : 1;
@@ -122,7 +135,9 @@ export default function GameScreen({ connectionSession = null, onExit }: GameScr
     };
   }, [peerSession]);
 
-  const currentStatus = game.status === 'playing'
+  const currentStatus = opponentForfeited
+    ? 'Opponent forfeited'
+    : game.status === 'playing'
     ? `Player ${game.currentPlayer}'s turn`
     : game.status === 'draw'
       ? "It's a draw"
@@ -141,12 +156,6 @@ export default function GameScreen({ connectionSession = null, onExit }: GameScr
       >
         <Text style={styles.connectionButtonText}>{peerSession ? `Connected as Player ${peerSession.getSnapshot().role === 'host' ? 1 : 2}` : 'Connect another device'}</Text>
       </Pressable>
-
-      {onExit && (
-        <Pressable testID="game-menu" accessibilityRole="button" onPress={onExit} style={styles.connectionButton}>
-          <Text style={styles.connectionButtonText}>Main menu</Text>
-        </Pressable>
-      )}
 
       <View style={styles.turnBadge} accessibilityLiveRegion="polite">
         {game.status === 'playing' && (
@@ -175,8 +184,8 @@ export default function GameScreen({ connectionSession = null, onExit }: GameScr
                     testID={`cell-${row}-${column}`}
                     accessibilityRole="button"
                     accessibilityLabel={label}
-                    accessibilityState={{ disabled: game.status !== 'playing' }}
-                    disabled={game.status !== 'playing'}
+                    accessibilityState={{ disabled: game.status !== 'playing' || opponentForfeited }}
+                    disabled={game.status !== 'playing' || opponentForfeited}
                     onPress={() => dropPiece(column)}
                     style={[styles.cell, { width: cellSize, height: cellSize }]}
                   >
@@ -216,24 +225,44 @@ export default function GameScreen({ connectionSession = null, onExit }: GameScr
             />
           )}
         </Animated.View>
-        {game.status === 'won' && winnerRevealed && (
+        {(game.status === 'won' || opponentForfeited) && winnerRevealed && (
           <View testID="winner-message" style={[styles.winnerCard, styles.winnerOverlay, { top: boardHeight / 2 - 44 }]}>
             <Text style={styles.winnerKicker}>GAME OVER</Text>
-            <Text style={styles.winnerText}>Player {game.winner} won</Text>
+            {opponentForfeited
+              ? <Text testID="forfeit-message" style={styles.winnerText}>You won by forfeit</Text>
+              : <Text style={styles.winnerText}>Player {game.winner} won</Text>}
           </View>
         )}
       </View>
 
-      <Pressable
-        testID="restart-button"
-        accessibilityRole="button"
-        onPress={restart}
-        style={({ pressed }) => [styles.restartButton, pressed && styles.restartPressed]}
-      >
-        <Text style={styles.restartText}>Restart game</Text>
-      </Pressable>
+      {!opponentForfeited && (
+        <Pressable
+          testID="leave-game"
+          accessibilityRole="button"
+          onPress={() => setShowLeaveConfirmation(true)}
+          style={styles.leaveButton}
+        >
+          <Text style={styles.leaveText}>Leave game</Text>
+        </Pressable>
+      )}
       <Text style={styles.footer}>Tap any hole to drop into that column</Text>
       {showConnection && <ConnectionScreen onClose={() => setShowConnection(false)} onConnected={(active) => { setPeerSession(active); setShowConnection(false); }} />}
+      <Modal visible={showLeaveConfirmation} transparent animationType="fade" onRequestClose={() => setShowLeaveConfirmation(false)}>
+        <View style={styles.confirmationOverlay}>
+          <View testID="leave-confirmation" style={styles.confirmationCard}>
+            <Text style={styles.confirmationTitle}>Leave this game?</Text>
+            <Text style={styles.confirmationText}>
+              {peerSession ? 'Leaving will end the connection and your opponent will win by forfeit.' : 'Are you sure you want to leave this local game?'}
+            </Text>
+            <Pressable testID="confirm-leave" accessibilityRole="button" onPress={confirmLeave} style={styles.confirmLeaveButton}>
+              <Text style={styles.leaveText}>Leave game</Text>
+            </Pressable>
+            <Pressable testID="cancel-leave" accessibilityRole="button" onPress={() => setShowLeaveConfirmation(false)} style={styles.cancelLeaveButton}>
+              <Text style={styles.cancelLeaveText}>Keep playing</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 }
@@ -333,16 +362,22 @@ const styles = StyleSheet.create({
   },
   winnerKicker: { color: '#8CA9D1', fontSize: 11, fontWeight: '800', letterSpacing: 2 },
   winnerText: { marginTop: 3, color: COLORS.text, fontSize: 25, fontWeight: '900' },
-  restartButton: {
-    minWidth: 170,
+  leaveButton: {
+    minWidth: 190,
     alignItems: 'center',
     marginTop: 24,
-    paddingHorizontal: 24,
+    paddingHorizontal: 28,
     paddingVertical: 13,
     borderRadius: 12,
-    backgroundColor: COLORS.button,
+    backgroundColor: '#B42332',
   },
-  restartPressed: { opacity: 0.75, transform: [{ scale: 0.98 }] },
-  restartText: { color: COLORS.text, fontSize: 16, fontWeight: '800' },
+  leaveText: { color: '#FFFFFF', fontSize: 16, fontWeight: '800' },
+  confirmationOverlay: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24, backgroundColor: 'rgba(4, 10, 20, 0.78)' },
+  confirmationCard: { width: '100%', maxWidth: 360, alignItems: 'center', padding: 24, borderRadius: 20, backgroundColor: '#15233A', borderWidth: 1, borderColor: '#334A6C' },
+  confirmationTitle: { color: COLORS.text, fontSize: 22, fontWeight: '900' },
+  confirmationText: { marginTop: 10, color: COLORS.muted, fontSize: 15, lineHeight: 21, textAlign: 'center' },
+  confirmLeaveButton: { width: '100%', alignItems: 'center', marginTop: 22, paddingVertical: 13, borderRadius: 12, backgroundColor: '#B42332' },
+  cancelLeaveButton: { width: '100%', alignItems: 'center', marginTop: 10, paddingVertical: 13, borderRadius: 12, backgroundColor: '#24436E' },
+  cancelLeaveText: { color: COLORS.text, fontSize: 15, fontWeight: '800' },
   footer: { marginTop: 15, color: COLORS.muted, fontSize: 13 },
 });
