@@ -54,18 +54,19 @@ class FakeSession implements ConnectionSessionPort {
   }
 }
 
-function renderConnection(session = new FakeSession()) {
+function renderConnection(session = new FakeSession(), initialRole: 'host' | 'client' = 'host') {
   const onClose = jest.fn();
-  render(<ConnectionScreen onClose={onClose} createSession={() => session} />);
+  render(<ConnectionScreen initialRole={initialRole} onClose={onClose} createSession={() => session} />);
   return { session, onClose };
 }
 
 describe('ConnectionScreen', () => {
-  test('shows the host and client choices before a session starts', () => {
-    // This checks a player can choose whether to display an Offer or scan the other device's Offer.
+  test('does not show a duplicate host and join choice screen', async () => {
+    // This checks the main menu is the only place players choose which connection role to start.
     renderConnection();
-    expect(screen.getByText('Host a connection')).toBeTruthy();
-    expect(screen.getByText('Join a connection')).toBeTruthy();
+    expect(await screen.findByTestId('signal-qr')).toBeTruthy();
+    expect(screen.queryByText('Host a connection')).toBeNull();
+    expect(screen.queryByText('Join a connection')).toBeNull();
   });
 
   test('starts hosting immediately when launched from the Host game menu choice', async () => {
@@ -87,7 +88,6 @@ describe('ConnectionScreen', () => {
   test('displays the host Offer QR and provides a scan step for the Answer', async () => {
     // This checks the host creates and displays the Offer before opening its Answer scanner.
     const { session } = renderConnection();
-    fireEvent.press(screen.getByText('Host a connection'));
     await waitFor(() => expect(screen.getByTestId('signal-qr')).toBeTruthy());
     expect(screen.getByText('Show this Offer QR to the other device')).toBeTruthy();
     expect(screen.getByText('Scan Answer QR')).toBeTruthy();
@@ -96,8 +96,7 @@ describe('ConnectionScreen', () => {
 
   test('scans an Offer, then displays the client Answer QR', async () => {
     // This checks the client scanner passes QR contents to signaling and moves to Answer display.
-    const { session } = renderConnection();
-    fireEvent.press(screen.getByText('Join a connection'));
+    const { session } = renderConnection(new FakeSession(), 'client');
     const camera = await screen.findByTestId('qr-camera');
     fireEvent(camera, 'onBarcodeScanned', { data: 'offer-code' });
     await waitFor(() => expect(screen.getByTestId('signal-qr')).toBeTruthy());
@@ -108,7 +107,6 @@ describe('ConnectionScreen', () => {
   test('scans an Answer and shows connecting followed by connected', async () => {
     // This checks the host applies the scanned Answer and reports the DataChannel state.
     const { session } = renderConnection();
-    fireEvent.press(screen.getByText('Host a connection'));
     await screen.findByTestId('signal-qr');
     fireEvent.press(screen.getByText('Scan Answer QR'));
     expect(await screen.findByText('Scanning Answer QR')).toBeTruthy();
@@ -122,30 +120,51 @@ describe('ConnectionScreen', () => {
     // This checks invalid camera data is shown as a recoverable error without crashing the connection screen.
     const session = new FakeSession();
     session.acceptOffer.mockRejectedValueOnce(new Error('Invalid Offer QR payload'));
-    renderConnection(session);
-    fireEvent.press(screen.getByText('Join a connection'));
+    renderConnection(session, 'client');
     const camera = await screen.findByTestId('qr-camera');
     fireEvent(camera, 'onBarcodeScanned', { data: 'invalid-code' });
     expect(await screen.findByText('Invalid Offer QR payload')).toBeTruthy();
     expect(screen.getByText('Try again')).toBeTruthy();
   });
 
-  test('retry disposes a failed session and returns to role selection', async () => {
-    // This checks retry releases the failed PeerConnection before a fresh host/client attempt.
-    const session = new FakeSession();
-    session.createOffer.mockRejectedValueOnce(new Error('ICE gathering timed out'));
-    renderConnection(session);
-    fireEvent.press(screen.getByText('Host a connection'));
+  test('retry creates a fresh session using the same connection role', async () => {
+    // This checks retry cleans up the failed attempt without bringing back the removed role-selection screen.
+    const failedSession = new FakeSession();
+    failedSession.createOffer.mockRejectedValueOnce(new Error('ICE gathering timed out'));
+    const nextSession = new FakeSession();
+    const createSession = jest.fn().mockReturnValueOnce(failedSession).mockReturnValueOnce(nextSession);
+    render(<ConnectionScreen initialRole="host" onClose={jest.fn()} createSession={createSession} />);
     expect(await screen.findByText('ICE gathering timed out')).toBeTruthy();
     fireEvent.press(screen.getByText('Try again'));
+    expect(failedSession.dispose).toHaveBeenCalled();
+    expect(await screen.findByTestId('signal-qr')).toBeTruthy();
+    expect(nextSession.createOffer).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText('Join a connection')).toBeNull();
+  });
+
+  test('canceling the join scan closes the connection flow and returns to the menu', async () => {
+    // This checks canceling the Offer scan exits the connection screen instead of returning to role choices.
+    const { session, onClose } = renderConnection(new FakeSession(), 'client');
+    await screen.findByTestId('qr-camera');
+    fireEvent.press(screen.getByTestId('cancel-scan'));
+    expect(onClose).toHaveBeenCalledTimes(1);
     expect(session.dispose).toHaveBeenCalled();
-    expect(screen.getByText('Join a connection')).toBeTruthy();
+  });
+
+  test('canceling the host Answer scan also exits the connection flow', async () => {
+    // This checks canceling either scanner consistently returns the host to the main menu.
+    const { session, onClose } = renderConnection();
+    await screen.findByTestId('signal-qr');
+    fireEvent.press(screen.getByText('Scan Answer QR'));
+    await screen.findByText('Scanning Answer QR');
+    fireEvent.press(screen.getByTestId('cancel-scan'));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(session.dispose).toHaveBeenCalled();
   });
 
   test('closes and disposes the PeerSession when the player exits the connection screen', async () => {
     // This checks the modal close path releases native resources rather than leaving listeners active.
     const { session, onClose } = renderConnection();
-    fireEvent.press(screen.getByText('Host a connection'));
     await screen.findByTestId('signal-qr');
     fireEvent.press(screen.getByText('Close'));
     expect(onClose).toHaveBeenCalled();

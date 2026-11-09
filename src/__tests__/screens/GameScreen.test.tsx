@@ -4,11 +4,15 @@ import GameScreen from '../../screens/GameScreen';
 import type { ConnectionSessionPort, ConnectionSnapshot } from '../../networking/PeerSession';
 
 function createFakeSession() {
-  const snapshot: ConnectionSnapshot = { phase: 'connected', role: 'host', signalType: null, signalPayload: null, error: null };
+  let snapshot: ConnectionSnapshot = { phase: 'connected', role: 'host', signalType: null, signalPayload: null, error: null };
   let messageListener: ((message: string) => void) | undefined;
+  const snapshotListeners = new Set<(value: ConnectionSnapshot) => void>();
   const session = {
     getSnapshot: jest.fn(() => snapshot),
-    subscribe: jest.fn(() => () => undefined),
+    subscribe: jest.fn((listener: (value: ConnectionSnapshot) => void) => {
+      snapshotListeners.add(listener);
+      return () => snapshotListeners.delete(listener);
+    }),
     createOffer: jest.fn(),
     acceptOffer: jest.fn(),
     acceptAnswer: jest.fn(),
@@ -17,17 +21,26 @@ function createFakeSession() {
       messageListener = listener;
       return () => { messageListener = undefined; };
     }),
-    dispose: jest.fn(),
+    dispose: jest.fn(() => {
+      snapshot = { ...snapshot, phase: 'closed' };
+      snapshotListeners.forEach((listener) => listener(snapshot));
+    }),
   } as unknown as ConnectionSessionPort;
-  return { session, receive: (message: string) => messageListener?.(message) };
+  return {
+    session,
+    receive: (message: string) => messageListener?.(message),
+    setPhase: (phase: ConnectionSnapshot['phase']) => {
+      snapshot = { ...snapshot, phase };
+      snapshotListeners.forEach((listener) => listener(snapshot));
+    },
+  };
 }
 
 describe('GameScreen', () => {
-  test('opens the device connection flow without replacing the local board', () => {
-    // This checks the networking screen is reachable while preserving the current game screen.
+  test('does not show the duplicate in-game device connection entry', () => {
+    // This checks host and join choices stay on the main menu instead of opening a second chooser mid-game.
     render(<GameScreen />);
-    fireEvent.press(screen.getByTestId('open-connection'));
-    expect(screen.getByText('Host a connection')).toBeTruthy();
+    expect(screen.queryByTestId('open-connection')).toBeNull();
     expect(screen.getByText("Player 1's turn")).toBeTruthy();
   });
 
@@ -111,6 +124,35 @@ describe('GameScreen', () => {
     expect(onExit).not.toHaveBeenCalled();
     act(() => jest.advanceTimersByTime(2000));
     expect(onExit).toHaveBeenCalledTimes(1);
+    jest.useRealTimers();
+  });
+
+  test('shows a connection-lost message when the peer session disconnects', () => {
+    // This checks unexpected transport loss is reported clearly without claiming a forfeit win.
+    jest.useFakeTimers();
+    const { session, setPhase } = createFakeSession();
+    const onExit = jest.fn();
+    render(<GameScreen connectionSession={session} onExit={onExit} />);
+    act(() => setPhase('failed'));
+    expect(session.dispose).toHaveBeenCalledTimes(1);
+    expect(onExit).not.toHaveBeenCalled();
+    act(() => jest.advanceTimersByTime(2900));
+    expect(screen.getByTestId('connection-lost-message')).toBeTruthy();
+    act(() => jest.advanceTimersByTime(2000));
+    expect(onExit).toHaveBeenCalledTimes(1);
+    jest.useRealTimers();
+  });
+
+  test('does not treat intentional local disposal as an opponent disconnect', () => {
+    // This checks confirming the player's own leave does not start a second local forfeit animation.
+    jest.useFakeTimers();
+    const { session } = createFakeSession();
+    const onExit = jest.fn();
+    render(<GameScreen connectionSession={session} onExit={onExit} />);
+    fireEvent.press(screen.getByTestId('leave-game'));
+    fireEvent.press(screen.getByTestId('confirm-leave'));
+    expect(onExit).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('forfeit-message')).toBeNull();
     jest.useRealTimers();
   });
 });

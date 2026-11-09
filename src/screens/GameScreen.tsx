@@ -9,7 +9,6 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import ConnectionScreen from './ConnectionScreen';
 import { COLUMN_COUNT, ROW_COUNT, createGameState, playMove } from '../game';
 import type { GameState, Player } from '../game';
 import type { ConnectionSessionPort } from '../networking/PeerSession';
@@ -24,7 +23,6 @@ const COLORS = {
   winningRing: '#FF233F',
   text: '#F7FAFF',
   muted: '#AAB8D0',
-  button: '#24436E',
 };
 
 interface GameScreenProps {
@@ -40,9 +38,9 @@ export default function GameScreen({ connectionSession = null, onExit }: GameScr
   const { width } = useWindowDimensions();
   const [game, setGame] = useState<GameState>(() => createGameState());
   const [winnerRevealed, setWinnerRevealed] = useState(false);
-  const [showConnection, setShowConnection] = useState(false);
   const [showLeaveConfirmation, setShowLeaveConfirmation] = useState(false);
   const [opponentForfeited, setOpponentForfeited] = useState(false);
+  const [connectionLost, setConnectionLost] = useState(false);
   const [peerSession, setPeerSession] = useState<ConnectionSessionPort | null>(connectionSession);
   const boardOpacity = useRef(new Animated.Value(1)).current;
   const dropProgress = useRef(new Animated.Value(1)).current;
@@ -81,7 +79,7 @@ export default function GameScreen({ connectionSession = null, onExit }: GameScr
   }, [game.lastMove, dropProgress]);
 
   useEffect(() => {
-    if (game.status !== 'won' && !opponentForfeited) {
+    if (game.status !== 'won' && !opponentForfeited && !connectionLost) {
       boardOpacity.stopAnimation();
       boardOpacity.setValue(1);
       setWinnerRevealed(false);
@@ -98,13 +96,13 @@ export default function GameScreen({ connectionSession = null, onExit }: GameScr
     });
     fade.start();
     const revealTimeout = setTimeout(() => setWinnerRevealed(true), 2900);
-    const returnTimeout = opponentForfeited ? setTimeout(() => onExit?.(), 4900) : null;
+    const returnTimeout = opponentForfeited || connectionLost ? setTimeout(() => onExit?.(), 4900) : null;
     return () => {
       clearTimeout(revealTimeout);
       if (returnTimeout) clearTimeout(returnTimeout);
       fade.stop();
     };
-  }, [game.status, opponentForfeited, boardOpacity, onExit]);
+  }, [game.status, opponentForfeited, connectionLost, boardOpacity, onExit]);
 
   const dropPiece = (column: number) => {
     if (opponentForfeited) return;
@@ -118,6 +116,13 @@ export default function GameScreen({ connectionSession = null, onExit }: GameScr
 
   useEffect(() => {
     if (!peerSession) return;
+    const handleConnectionSnapshot = (snapshot: ReturnType<ConnectionSessionPort['getSnapshot']>) => {
+      if (snapshot.phase === 'failed') {
+        setConnectionLost(true);
+        peerSession.dispose();
+      }
+    };
+    const unsubscribeConnection = peerSession.subscribe(handleConnectionSnapshot);
     const unsubscribe = peerSession.subscribeMessages((raw) => {
       const message = decodeGameMessage(raw);
       if (!message) return;
@@ -129,14 +134,21 @@ export default function GameScreen({ connectionSession = null, onExit }: GameScr
       const remotePlayer: Player = peerSession.getSnapshot().role === 'host' ? 2 : 1;
       setGame((current) => current.currentPlayer === remotePlayer ? playMove(current, message.column) : current);
     });
+    if (peerSession.getSnapshot().phase === 'failed') {
+      setConnectionLost(true);
+      peerSession.dispose();
+    }
     return () => {
+      unsubscribeConnection();
       unsubscribe();
       peerSession.dispose();
     };
   }, [peerSession]);
 
-  const currentStatus = opponentForfeited
-    ? 'Opponent forfeited'
+  const currentStatus = connectionLost
+    ? 'Connection lost with opponent'
+    : opponentForfeited
+      ? 'Opponent forfeited'
     : game.status === 'playing'
     ? `Player ${game.currentPlayer}'s turn`
     : game.status === 'draw'
@@ -147,18 +159,8 @@ export default function GameScreen({ connectionSession = null, onExit }: GameScr
     <ScrollView contentContainerStyle={styles.screen} style={styles.scroll}>
       <Text style={styles.eyebrow}>{peerSession ? 'ONLINE MATCH' : 'PASS & PLAY'}</Text>
       <Text style={styles.title}>Connect Four</Text>
-      <Pressable
-        testID="open-connection"
-        accessibilityRole="button"
-        onPress={() => setShowConnection(true)}
-        disabled={!!peerSession}
-        style={styles.connectionButton}
-      >
-        <Text style={styles.connectionButtonText}>{peerSession ? `Connected as Player ${peerSession.getSnapshot().role === 'host' ? 1 : 2}` : 'Connect another device'}</Text>
-      </Pressable>
-
       <View style={styles.turnBadge} accessibilityLiveRegion="polite">
-        {game.status === 'playing' && (
+        {game.status === 'playing' && !opponentForfeited && !connectionLost && (
           <View style={[styles.turnDot, { backgroundColor: playerColor(game.currentPlayer) }]} />
         )}
         <Text style={styles.turnText}>{currentStatus}</Text>
@@ -184,8 +186,8 @@ export default function GameScreen({ connectionSession = null, onExit }: GameScr
                     testID={`cell-${row}-${column}`}
                     accessibilityRole="button"
                     accessibilityLabel={label}
-                    accessibilityState={{ disabled: game.status !== 'playing' || opponentForfeited }}
-                    disabled={game.status !== 'playing' || opponentForfeited}
+                    accessibilityState={{ disabled: game.status !== 'playing' || opponentForfeited || connectionLost }}
+                    disabled={game.status !== 'playing' || opponentForfeited || connectionLost}
                     onPress={() => dropPiece(column)}
                     style={[styles.cell, { width: cellSize, height: cellSize }]}
                   >
@@ -225,17 +227,19 @@ export default function GameScreen({ connectionSession = null, onExit }: GameScr
             />
           )}
         </Animated.View>
-        {(game.status === 'won' || opponentForfeited) && winnerRevealed && (
+        {(game.status === 'won' || opponentForfeited || connectionLost) && winnerRevealed && (
           <View testID="winner-message" style={[styles.winnerCard, styles.winnerOverlay, { top: boardHeight / 2 - 44 }]}>
-            <Text style={styles.winnerKicker}>GAME OVER</Text>
-            {opponentForfeited
+            <Text style={styles.winnerKicker}>{connectionLost ? 'CONNECTION ENDED' : 'GAME OVER'}</Text>
+            {connectionLost
+              ? <Text testID="connection-lost-message" style={styles.winnerText}>Connection lost with opponent</Text>
+              : opponentForfeited
               ? <Text testID="forfeit-message" style={styles.winnerText}>You won by forfeit</Text>
               : <Text style={styles.winnerText}>Player {game.winner} won</Text>}
           </View>
         )}
       </View>
 
-      {!opponentForfeited && (
+      {!opponentForfeited && !connectionLost && (
         <Pressable
           testID="leave-game"
           accessibilityRole="button"
@@ -246,7 +250,6 @@ export default function GameScreen({ connectionSession = null, onExit }: GameScr
         </Pressable>
       )}
       <Text style={styles.footer}>Tap any hole to drop into that column</Text>
-      {showConnection && <ConnectionScreen onClose={() => setShowConnection(false)} onConnected={(active) => { setPeerSession(active); setShowConnection(false); }} />}
       <Modal visible={showLeaveConfirmation} transparent animationType="fade" onRequestClose={() => setShowLeaveConfirmation(false)}>
         <View style={styles.confirmationOverlay}>
           <View testID="leave-confirmation" style={styles.confirmationCard}>
@@ -291,14 +294,6 @@ const styles = StyleSheet.create({
     borderRadius: 22,
     backgroundColor: '#15233A',
   },
-  connectionButton: {
-    marginBottom: 12,
-    paddingHorizontal: 15,
-    paddingVertical: 9,
-    borderRadius: 18,
-    backgroundColor: '#15233A',
-  },
-  connectionButtonText: { color: '#B9D2FF', fontSize: 13, fontWeight: '700' },
   turnDot: { width: 12, height: 12, borderRadius: 6 },
   turnText: { color: COLORS.text, fontSize: 16, fontWeight: '700' },
   boardFrame: {

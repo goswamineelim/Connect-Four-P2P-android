@@ -151,6 +151,28 @@ describe('PeerSession signaling lifecycle', () => {
     expect(peer.close).toHaveBeenCalledTimes(1);
   });
 
+  test('reports a disconnected PeerConnection to the active game as a failed session', async () => {
+    // This checks a network change such as Wi-Fi loss surfaces through the session snapshot for forfeit handling.
+    const peer = new FakePeerConnection();
+    const { factory } = createFactory([peer]);
+    const session = new PeerSession(factory);
+    await session.createOffer();
+    const answer = encodeSignalPayload('answer', { type: 'answer', sdp: 'v=0\r\na=remote-answer' });
+    await session.acceptAnswer(answer);
+    peer.dataChannel.open();
+    const phases: string[] = [];
+    session.subscribe((snapshot) => phases.push(snapshot.phase));
+
+    peer.connectionState = 'disconnected';
+    peer.emit('connectionstatechange');
+
+    expect(session.getSnapshot().phase).toBe('failed');
+    expect(session.getSnapshot().error).toMatch(/disconnected/i);
+    expect(phases).toContain('failed');
+    expect(peer.dataChannel.close).toHaveBeenCalledTimes(1);
+    expect(peer.close).toHaveBeenCalledTimes(1);
+  });
+
   test('fails after the DataChannel open deadline and cleans up the host connection', async () => {
     // This checks that a peer which never opens its channel times out instead of remaining stuck on connecting.
     jest.useFakeTimers();

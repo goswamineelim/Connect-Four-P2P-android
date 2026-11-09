@@ -244,8 +244,10 @@ export class PeerSession implements ConnectionSessionPort {
 
   private attachPeerListeners(peer: RtcPeerConnectionLike): void {
     const onConnectionState = () => {
-      if (peer.connectionState === 'failed' || peer.iceConnectionState === 'failed') {
-        this.fail(new Error('The direct connection failed. Retry on a less restricted network.'));
+      if (peer.connectionState === 'disconnected' || peer.iceConnectionState === 'disconnected') {
+        this.fail(new Error('The direct connection was disconnected.'));
+      } else if (peer.connectionState === 'failed' || peer.iceConnectionState === 'failed') {
+        this.fail(new Error('The direct connection failed.'));
       }
     };
     const onDataChannel = (event?: { channel?: RtcDataChannelLike }) => {

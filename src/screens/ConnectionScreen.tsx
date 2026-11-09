@@ -13,7 +13,7 @@ import type { ConnectionSessionPort, ConnectionSnapshot } from '../networking/Pe
 import type { SignalRole } from '../networking/signalingPayload';
 
 interface ConnectionScreenProps {
-  initialRole?: 'host' | 'client';
+  initialRole: 'host' | 'client';
   onClose: () => void;
   onConnected?: (session: ConnectionSessionPort) => void;
   createSession?: () => ConnectionSessionPort;
@@ -71,15 +71,12 @@ export default function ConnectionScreen({ initialRole, onClose, onConnected, cr
   };
 
   const retry = () => {
-    unsubscribeRef.current?.();
-    unsubscribeRef.current = null;
-    sessionRef.current?.dispose();
-    sessionRef.current = null;
-    setSession(null);
     setSnapshot(EMPTY_SNAPSHOT);
     setScanningRole(null);
     setLocalError(null);
     scanLockedRef.current = false;
+    if (initialRole === 'host') void host();
+    else void join();
   };
 
   const beginScan = async (role: SignalRole) => {
@@ -111,7 +108,7 @@ export default function ConnectionScreen({ initialRole, onClose, onConnected, cr
 
   useEffect(() => {
     if (initialRole === 'host') void host();
-    else if (initialRole === 'client') void join();
+    else void join();
     // The role is a launch instruction; retries remain under the player's control.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -147,7 +144,7 @@ export default function ConnectionScreen({ initialRole, onClose, onConnected, cr
               ? 'Connected'
               : snapshot.phase === 'failed'
                 ? 'Connection failed'
-                : 'Choose how to connect';
+                : 'Starting connection';
 
   const errorText = localError || snapshot.error;
   const signalTypeText = snapshot.signalType === 'offer'
@@ -169,17 +166,6 @@ export default function ConnectionScreen({ initialRole, onClose, onConnected, cr
         <Text testID="connection-status" accessibilityLiveRegion="polite" style={styles.status}>
           {statusText}
         </Text>
-
-        {!session && (
-          <View style={styles.choices}>
-            <Pressable testID="role-host" accessibilityRole="button" onPress={host} style={styles.primaryButton}>
-              <Text style={styles.primaryText}>Host a connection</Text>
-            </Pressable>
-            <Pressable testID="role-client" accessibilityRole="button" onPress={join} style={styles.secondaryButton}>
-              <Text style={styles.secondaryText}>Join a connection</Text>
-            </Pressable>
-          </View>
-        )}
 
         {scanningRole && permission?.granted && (
           <View style={styles.scannerFrame}>
@@ -219,7 +205,7 @@ export default function ConnectionScreen({ initialRole, onClose, onConnected, cr
           <Pressable
             testID="cancel-scan"
             accessibilityRole="button"
-            onPress={() => snapshot.role === 'host' ? setScanningRole(null) : retry()}
+            onPress={close}
             style={styles.secondaryButton}
           >
             <Text style={styles.secondaryText}>Cancel scan</Text>
@@ -243,7 +229,6 @@ const styles = StyleSheet.create({
   closeText: { color: '#F7FAFF', fontSize: 14, fontWeight: '700' },
   title: { marginTop: 20, color: '#F7FAFF', fontSize: 28, fontWeight: '900' },
   status: { marginTop: 10, marginBottom: 22, color: '#D4DFF1', fontSize: 16, fontWeight: '700', textAlign: 'center' },
-  choices: { width: '100%', gap: 12 },
   primaryButton: { minWidth: 190, alignItems: 'center', marginTop: 14, paddingHorizontal: 22, paddingVertical: 13, borderRadius: 12, backgroundColor: '#1769E8' },
   primaryText: { color: '#FFFFFF', fontSize: 15, fontWeight: '800' },
   secondaryButton: { minWidth: 190, alignItems: 'center', marginTop: 12, paddingHorizontal: 22, paddingVertical: 13, borderRadius: 12, backgroundColor: '#1B2C47' },
