@@ -68,6 +68,22 @@ describe('ConnectionScreen', () => {
     expect(screen.getByText('Join a connection')).toBeTruthy();
   });
 
+  test('starts hosting immediately when launched from the Host game menu choice', async () => {
+    // This checks selecting Host game in the main menu skips the second role-selection step and creates an Offer.
+    const session = new FakeSession();
+    render(<ConnectionScreen initialRole="host" onClose={jest.fn()} createSession={() => session} />);
+    await waitFor(() => expect(session.createOffer).toHaveBeenCalledTimes(1));
+    expect(await screen.findByTestId('signal-qr')).toBeTruthy();
+  });
+
+  test('starts the Offer scanner immediately when launched from the Join game menu choice', async () => {
+    // This checks selecting Join game in the main menu opens the camera scanner for the host's Offer.
+    const session = new FakeSession();
+    render(<ConnectionScreen initialRole="client" onClose={jest.fn()} createSession={() => session} />);
+    expect(await screen.findByTestId('qr-camera')).toBeTruthy();
+    expect(screen.getByText('Scanning Offer QR')).toBeTruthy();
+  });
+
   test('displays the host Offer QR and provides a scan step for the Answer', async () => {
     // This checks the host creates and displays the Offer before opening its Answer scanner.
     const { session } = renderConnection();

@@ -26,16 +26,21 @@ const COLORS = {
   button: '#24436E',
 };
 
+interface GameScreenProps {
+  connectionSession?: ConnectionSessionPort | null;
+  onExit?: () => void;
+}
+
 function playerColor(player: Player): string {
   return player === 1 ? COLORS.playerOne : COLORS.playerTwo;
 }
 
-export default function GameScreen() {
+export default function GameScreen({ connectionSession = null, onExit }: GameScreenProps) {
   const { width } = useWindowDimensions();
   const [game, setGame] = useState<GameState>(() => createGameState());
   const [winnerRevealed, setWinnerRevealed] = useState(false);
   const [showConnection, setShowConnection] = useState(false);
-  const [peerSession, setPeerSession] = useState<ConnectionSessionPort | null>(null);
+  const [peerSession, setPeerSession] = useState<ConnectionSessionPort | null>(connectionSession);
   const boardOpacity = useRef(new Animated.Value(1)).current;
   const dropProgress = useRef(new Animated.Value(1)).current;
   const winnerCellKeys = useMemo(
@@ -136,6 +141,12 @@ export default function GameScreen() {
       >
         <Text style={styles.connectionButtonText}>{peerSession ? `Connected as Player ${peerSession.getSnapshot().role === 'host' ? 1 : 2}` : 'Connect another device'}</Text>
       </Pressable>
+
+      {onExit && (
+        <Pressable testID="game-menu" accessibilityRole="button" onPress={onExit} style={styles.connectionButton}>
+          <Text style={styles.connectionButtonText}>Main menu</Text>
+        </Pressable>
+      )}
 
       <View style={styles.turnBadge} accessibilityLiveRegion="polite">
         {game.status === 'playing' && (

@@ -13,6 +13,7 @@ import type { ConnectionSessionPort, ConnectionSnapshot } from '../networking/Pe
 import type { SignalRole } from '../networking/signalingPayload';
 
 interface ConnectionScreenProps {
+  initialRole?: 'host' | 'client';
   onClose: () => void;
   onConnected?: (session: ConnectionSessionPort) => void;
   createSession?: () => ConnectionSessionPort;
@@ -26,7 +27,7 @@ const EMPTY_SNAPSHOT: ConnectionSnapshot = {
   error: null,
 };
 
-export default function ConnectionScreen({ onClose, onConnected, createSession = () => new PeerSession() }: ConnectionScreenProps) {
+export default function ConnectionScreen({ initialRole, onClose, onConnected, createSession = () => new PeerSession() }: ConnectionScreenProps) {
   const [permission, requestPermission] = useCameraPermissions();
   const [session, setSession] = useState<ConnectionSessionPort | null>(null);
   const [snapshot, setSnapshot] = useState<ConnectionSnapshot>(EMPTY_SNAPSHOT);
@@ -107,6 +108,13 @@ export default function ConnectionScreen({ onClose, onConnected, createSession =
     createNewSession();
     await beginScan('offer');
   };
+
+  useEffect(() => {
+    if (initialRole === 'host') void host();
+    else if (initialRole === 'client') void join();
+    // The role is a launch instruction; retries remain under the player's control.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const onBarcodeScanned = async ({ data }: { data: string }) => {
     if (scanLockedRef.current || !data) return;
