@@ -13,11 +13,22 @@
           "recordAudioAndroid": false
         }
       ],
-      "@config-plugins/react-native-webrtc"
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Connect Four to access photos so you can scan a QR code.",
+          "microphonePermission": false
+        }
+      ],
+      "@config-plugins/react-native-webrtc",
+      "expo-sharing",
+      "expo-asset"
     ],
     "android": {
       "package": "com.connectfour.passandplay",
-      "blockedPermissions": ["android.permission.RECORD_AUDIO"]
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
     }
   }
 }

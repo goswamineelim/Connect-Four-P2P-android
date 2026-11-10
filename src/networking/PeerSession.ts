@@ -92,7 +92,10 @@ type RegisteredListener = {
 };
 
 function nativePeerFactory(): RtcPeerConnectionLike {
-  // Keep the native module lazy so the UI and mocked Jest suites can load before the custom dev client is installed.
+  // Browsers provide WebRTC directly; keep the native module lazy for mobile and mocked Jest suites.
+  if (typeof globalThis.RTCPeerConnection === 'function') {
+    return new globalThis.RTCPeerConnection(PEER_CONFIGURATION) as unknown as RtcPeerConnectionLike;
+  }
   const { RTCPeerConnection } = require('react-native-webrtc') as typeof import('react-native-webrtc');
   return new RTCPeerConnection(PEER_CONFIGURATION as never) as unknown as RtcPeerConnectionLike;
 }

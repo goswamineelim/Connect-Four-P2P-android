@@ -2,12 +2,18 @@ import { useEffect, useRef, useState } from 'react';
 import {
   Modal,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import { Asset } from 'expo-asset';
+import * as ImagePicker from 'expo-image-picker';
+import * as Sharing from 'expo-sharing';
+import { captureRef } from 'react-native-view-shot';
 import QRCode from 'react-native-qrcode-svg';
+import { WebView } from 'react-native-webview';
 import { PeerSession } from '../networking/PeerSession';
 import type { ConnectionSessionPort, ConnectionSnapshot } from '../networking/PeerSession';
 import type { SignalRole } from '../networking/signalingPayload';
@@ -33,6 +39,12 @@ export default function ConnectionScreen({ initialRole, onClose, onConnected, cr
   const [snapshot, setSnapshot] = useState<ConnectionSnapshot>(EMPTY_SNAPSHOT);
   const [scanningRole, setScanningRole] = useState<SignalRole | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
+  const [sharingQr, setSharingQr] = useState(false);
+  const [galleryScanDataUrl, setGalleryScanDataUrl] = useState<string | null>(null);
+  const [galleryScannerUri, setGalleryScannerUri] = useState<string | null>(null);
+  const webViewRef = useRef<WebView<{}> | null>(null);
+  const galleryScanTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const qrImageRef = useRef<any>(null);
   const sessionRef = useRef<ConnectionSessionPort | null>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const scanLockedRef = useRef(false);
@@ -40,6 +52,7 @@ export default function ConnectionScreen({ initialRole, onClose, onConnected, cr
   useEffect(() => () => {
     unsubscribeRef.current?.();
     sessionRef.current?.dispose();
+    if (galleryScanTimeoutRef.current) clearTimeout(galleryScanTimeoutRef.current);
   }, []);
 
   const createNewSession = () => {
@@ -82,6 +95,7 @@ export default function ConnectionScreen({ initialRole, onClose, onConnected, cr
   const beginScan = async (role: SignalRole) => {
     setLocalError(null);
     scanLockedRef.current = false;
+    setScanningRole(role);
     if (!permission?.granted) {
       const response = await requestPermission();
       if (!response.granted) {
@@ -89,7 +103,6 @@ export default function ConnectionScreen({ initialRole, onClose, onConnected, cr
         return;
       }
     }
-    setScanningRole(role);
   };
 
   const host = async () => {
@@ -113,7 +126,7 @@ export default function ConnectionScreen({ initialRole, onClose, onConnected, cr
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const onBarcodeScanned = async ({ data }: { data: string }) => {
+  const processScannedData = async (data: string) => {
     if (scanLockedRef.current || !data) return;
     scanLockedRef.current = true;
     const role = scanningRole;
@@ -127,6 +140,114 @@ export default function ConnectionScreen({ initialRole, onClose, onConnected, cr
       setLocalError(null);
     } catch (error) {
       setLocalError(error instanceof Error ? error.message : 'The scanned QR code could not be used.');
+    }
+  };
+
+  const onBarcodeScanned = ({ data }: { data: string }) => {
+    void processScannedData(data);
+  };
+
+  const chooseFromGallery = async () => {
+    setLocalError(null);
+    try {
+      const selection = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        // Cropping isolates the QR from chat screenshots and gallery margins before the one-shot scan.
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.85,
+        base64: true,
+      });
+      if (selection.canceled) return;
+
+      const image = selection.assets[0];
+      if (!image?.base64) {
+        setLocalError('Could not read that image. Choose another image or scan with the camera.');
+        return;
+      }
+
+      // Run the same qr-scanner image decoder as the web build inside a local WebView.
+      // The image picker has already applied the mobile square crop at this point.
+      const bridgeAsset = Asset.fromModule(require('../assets/qr-scanner-bridge.html'));
+      await bridgeAsset.downloadAsync();
+      if (!bridgeAsset.localUri) throw new Error('The local scanner page is not available.');
+      setGalleryScannerUri(bridgeAsset.localUri || bridgeAsset.uri);
+      setGalleryScanDataUrl(`data:${image.mimeType || 'image/jpeg'};base64,${image.base64}`);
+    } catch {
+      setLocalError('Could not prepare the gallery image scanner. Choose another image or scan with the camera.');
+    }
+  };
+
+  const onGalleryScanMessage = (event: { nativeEvent: { data: string } }) => {
+    if (galleryScanTimeoutRef.current) clearTimeout(galleryScanTimeoutRef.current);
+    galleryScanTimeoutRef.current = null;
+    if (event.nativeEvent.data === 'bridge-missing') {
+      setGalleryScannerUri(null);
+      setGalleryScanDataUrl(null);
+      setLocalError('The gallery QR scanner did not load. Try another image or use the camera.');
+      return;
+    }
+    if (event.nativeEvent.data === 'bridge-ready') {
+      const imageData = galleryScanDataUrl;
+      if (!imageData) return;
+      const encodedImage = JSON.stringify(imageData);
+      webViewRef.current?.injectJavaScript(`(function(){try{if(typeof window.scanQr!=="function")throw new Error("Scanner function is missing");window.scanQr(${encodedImage});}catch(error){window.ReactNativeWebView.postMessage(JSON.stringify({ok:false,message:String(error)}));}})();true;`);
+      galleryScanTimeoutRef.current = setTimeout(() => {
+        setGalleryScannerUri(null);
+        setGalleryScanDataUrl(null);
+        setLocalError('The gallery QR scanner did not respond. Try another image or use the camera.');
+      }, 15000);
+      return;
+    }
+    setGalleryScannerUri(null);
+    setGalleryScanDataUrl(null);
+    try {
+      const result = JSON.parse(event.nativeEvent.data) as { ok?: boolean; data?: string; message?: string };
+      if (result.ok && result.data) {
+        void processScannedData(result.data);
+        return;
+      }
+      if (result.message && !result.message.toLowerCase().includes('no qr code found')) {
+        setLocalError(`Could not scan that image: ${result.message}`);
+        return;
+      }
+    } catch { /* Treat malformed bridge output as a QR scan failure. */ }
+    setLocalError('No QR code was found in that crop. Choose the image again and crop tightly around the QR, or scan with the camera.');
+  };
+
+  const onGalleryScannerLoadEnd = () => {
+    // Wait for the bundled HTML script to install the scanner and signal that the WebView bridge is ready.
+    webViewRef.current?.injectJavaScript(`window.ReactNativeWebView.postMessage(typeof window.scanQr === 'function' ? 'bridge-ready' : 'bridge-missing'); true;`);
+    if (galleryScanTimeoutRef.current) clearTimeout(galleryScanTimeoutRef.current);
+    galleryScanTimeoutRef.current = setTimeout(() => {
+      setGalleryScannerUri(null);
+      setGalleryScanDataUrl(null);
+      setLocalError('The gallery QR scanner could not start. Try another image or use the camera.');
+    }, 15000);
+  };
+
+  const shareQr = async () => {
+    if (!qrImageRef.current || sharingQr) return;
+    setSharingQr(true);
+    setLocalError(null);
+    try {
+      if (!await Sharing.isAvailableAsync()) {
+        setLocalError('Sharing is not available on this device.');
+        return;
+      }
+      const imageUri = await captureRef(qrImageRef, {
+        format: 'png',
+        quality: 1,
+        result: 'tmpfile',
+      });
+      await Sharing.shareAsync(imageUri, {
+        mimeType: 'image/png',
+        dialogTitle: 'Share connection QR code',
+      });
+    } catch {
+      setLocalError('Could not share the QR code. Try again.');
+    } finally {
+      setSharingQr(false);
     }
   };
 
@@ -155,7 +276,7 @@ export default function ConnectionScreen({ initialRole, onClose, onConnected, cr
 
   return (
     <Modal visible animationType="slide" onRequestClose={close}>
-      <View style={styles.screen}>
+      <ScrollView contentContainerStyle={styles.screen}>
         <View style={styles.header}>
           <Text style={styles.eyebrow}>DIRECT CONNECTION</Text>
           <Pressable testID="connection-close" accessibilityRole="button" onPress={close} style={styles.closeButton}>
@@ -181,16 +302,59 @@ export default function ConnectionScreen({ initialRole, onClose, onConnected, cr
           </View>
         )}
 
+        {scanningRole && (
+          <Pressable testID="choose-from-gallery" accessibilityRole="button" onPress={chooseFromGallery} style={styles.primaryButton}>
+            <Text style={styles.primaryText}>Choose from gallery</Text>
+          </Pressable>
+        )}
+
         {snapshot.signalPayload && (
           <View style={styles.qrPanel}>
             <Text style={styles.instruction}>{signalTypeText}</Text>
-            <View testID="signal-qr" style={styles.qrFrame}>
-              <QRCode value={snapshot.signalPayload} size={250} ecl="L" quietZone={12} />
+            <View testID="signal-qr" ref={qrImageRef} collapsable={false} style={styles.qrFrame}>
+              <QRCode value={snapshot.signalPayload} size={420} ecl="L" quietZone={24} />
             </View>
+            <Pressable
+              testID="share-qr"
+              accessibilityRole="button"
+              accessibilityState={{ disabled: sharingQr }}
+              disabled={sharingQr}
+              onPress={shareQr}
+              style={styles.primaryButton}
+            >
+              <Text style={styles.primaryText}>{sharingQr ? 'Preparing QR image…' : 'Share QR'}</Text>
+            </Pressable>
             {snapshot.phase === 'connecting' && (
               <Text style={styles.helper}>Keep this QR visible while the host scans it.</Text>
             )}
           </View>
+        )}
+
+        {galleryScannerUri && galleryScanDataUrl && (
+          <WebView<{}>
+            ref={webViewRef}
+            source={{ uri: galleryScannerUri }}
+            javaScriptEnabled
+            originWhitelist={['*']}
+            allowFileAccess
+            onLoadEnd={onGalleryScannerLoadEnd}
+            onError={(event) => {
+              if (galleryScanTimeoutRef.current) clearTimeout(galleryScanTimeoutRef.current);
+              galleryScanTimeoutRef.current = null;
+              setGalleryScannerUri(null);
+              setGalleryScanDataUrl(null);
+              setLocalError(`The gallery QR scanner page failed to load: ${event.nativeEvent.description || 'unknown WebView error'}`);
+            }}
+            onHttpError={(event) => {
+              if (galleryScanTimeoutRef.current) clearTimeout(galleryScanTimeoutRef.current);
+              galleryScanTimeoutRef.current = null;
+              setGalleryScannerUri(null);
+              setGalleryScanDataUrl(null);
+              setLocalError(`The gallery QR scanner page returned HTTP ${event.nativeEvent.statusCode}.`);
+            }}
+            onMessage={onGalleryScanMessage}
+            style={styles.hiddenGalleryScanner}
+          />
         )}
 
         {session && snapshot.phase === 'showing-qr' && snapshot.signalType === 'offer' && !scanningRole && (
@@ -216,13 +380,13 @@ export default function ConnectionScreen({ initialRole, onClose, onConnected, cr
             <Text style={styles.primaryText}>Try again</Text>
           </Pressable>
         )}
-      </View>
+      </ScrollView>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, alignItems: 'center', paddingHorizontal: 24, paddingTop: 24, paddingBottom: 32, backgroundColor: '#091326' },
+  screen: { flexGrow: 1, alignItems: 'center', paddingHorizontal: 24, paddingTop: 24, paddingBottom: 32, backgroundColor: '#091326' },
   header: { width: '100%', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   eyebrow: { color: '#76A8FF', fontSize: 11, fontWeight: '800', letterSpacing: 2 },
   closeButton: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10, backgroundColor: '#15233A' },
@@ -237,7 +401,8 @@ const styles = StyleSheet.create({
   camera: { flex: 1 },
   qrPanel: { alignItems: 'center', marginTop: 8 },
   instruction: { marginBottom: 14, color: '#F7FAFF', fontSize: 16, fontWeight: '800', textAlign: 'center' },
-  qrFrame: { padding: 14, borderRadius: 16, backgroundColor: '#FFFFFF' },
+  qrFrame: { padding: 24, borderRadius: 16, backgroundColor: '#FFFFFF' },
   helper: { maxWidth: 280, marginTop: 12, color: '#AAB8D0', fontSize: 13, textAlign: 'center' },
   error: { maxWidth: 320, marginTop: 16, color: '#FF8590', fontSize: 14, lineHeight: 20, textAlign: 'center' },
+  hiddenGalleryScanner: { position: 'absolute', left: -2, top: -2, width: 1, height: 1, opacity: 0 },
 });
